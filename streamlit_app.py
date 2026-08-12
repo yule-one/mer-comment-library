@@ -1,0 +1,220 @@
+from __future__ import annotations
+
+import html
+import json
+import os
+import re
+import urllib.error
+import urllib.request
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+import streamlit as st
+import streamlit.components.v1 as components
+
+
+ROOT = Path(__file__).resolve().parent
+STATE_PATH = ROOT / ".mer-curation-state.json"
+LOCAL_BRIDGE = os.getenv("MER_BRIDGE_URL", "http://127.0.0.1:4319").rstrip("/")
+REFRESH_WEBHOOK = os.getenv("MER_REFRESH_WEBHOOK_URL", "").strip()
+REFRESH_TOKEN = os.getenv("MER_REFRESH_WEBHOOK_TOKEN", "").strip()
+
+
+st.set_page_config(
+    page_title="메르 댓글 라이브러리",
+    page_icon="📰",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+
+st.markdown(
+    """
+    <style>
+    :root { --mer-green:#194f3d; --mer-cream:#f5f0e5; --mer-ink:#17231f; }
+    .stApp { background: radial-gradient(circle at 8% 0, rgba(37,95,70,.10), transparent 36rem), var(--mer-cream); }
+    [data-testid="stSidebar"] { background: #173d30; }
+    [data-testid="stSidebar"] * { color: #f8f4e8; }
+    [data-testid="stSidebar"] input { color: #17231f !important; }
+    [data-testid="stSidebar"] .stButton button { border: 1px solid rgba(255,255,255,.24); background:#214f3e; }
+    .mer-eyebrow { color:#a27325; font-size:.76rem; font-weight:800; letter-spacing:.13em; }
+    .mer-title { font-family: Georgia, 'Nanum Myeongjo', serif; font-size:clamp(2rem,4vw,3.8rem); line-height:1.12; letter-spacing:-.04em; margin:.2rem 0 1rem; }
+    .mer-meta { color:#697069; margin-bottom:1.25rem; }
+    .mer-card { border:1px solid #d9d0bf; border-radius:18px; padding:1rem 1.1rem; background:rgba(255,253,248,.78); }
+    .mer-note { border-left:4px solid #a27325; padding:.85rem 1rem; background:#fff0d6; border-radius:0 12px 12px 0; color:#5f4b2c; }
+    div[data-testid="stMetric"] { border:1px solid #d9d0bf; border-radius:15px; padding:.85rem 1rem; background:rgba(255,253,248,.80); }
+    iframe { border-radius:18px; border:1px solid #d9d0bf !important; background:#fff; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+def load_json(path: Path, fallback: dict[str, Any]) -> dict[str, Any]:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return fallback
+
+
+def topic_count(report_name: str) -> int:
+    try:
+        report = (ROOT / report_name).read_text(encoding="utf-8")
+    except OSError:
+        return 0
+    return len(
+        re.findall(
+            r'<details\b[^>]*\bclass=["\'][^"\']*\btopic\b[^"\']*["\']',
+            report,
+            flags=re.IGNORECASE,
+        )
+    )
+
+
+def format_timestamp(value: str) -> str:
+    if not value:
+        return "—"
+    try:
+        return datetime.fromisoformat(value).strftime("%Y.%m.%d %H:%M")
+    except ValueError:
+        return value
+
+
+def load_posts() -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    state = load_json(STATE_PATH, {"posts": {}})
+    posts: list[dict[str, Any]] = []
+    for log_no, raw in state.get("posts", {}).items():
+        post = dict(raw)
+        post["log_no"] = log_no
+        post["topic_count"] = topic_count(str(post.get("report_html", "")))
+        posts.append(post)
+    posts.sort(
+        key=lambda item: f"{item.get('published_date', '')}{item.get('first_seen_at', '')}",
+        reverse=True,
+    )
+    return state, posts
+
+
+def request_refresh(post: dict[str, Any]) -> tuple[bool, str]:
+    if REFRESH_WEBHOOK:
+        endpoint = REFRESH_WEBHOOK
+        payload = {
+            "logNo": post["log_no"],
+            "url": post.get("url", ""),
+            "source": "streamlit",
+        }
+        headers = {"Content-Type": "application/json"}
+        if REFRESH_TOKEN:
+            headers["Authorization"] = f"Bearer {REFRESH_TOKEN}"
+    else:
+        endpoint = f"{LOCAL_BRIDGE}/api/refresh/{post['log_no']}"
+        payload = {}
+        headers = {"Content-Type": "application/json"}
+
+    request = urllib.request.Request(
+        endpoint,
+        data=json.dumps(payload).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=8) as response:
+            result = json.loads(response.read().decode("utf-8") or "{}")
+        message = result.get("job", {}).get("message") or result.get("message") or "조회 요청을 보냈습니다."
+        return True, message
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, json.JSONDecodeError) as error:
+        if not REFRESH_WEBHOOK:
+            return False, "배포 화면에서는 조회 웹훅 설정이 필요합니다. 로컬에서는 start-dashboard.ps1을 실행해 주세요."
+        return False, f"조회 요청을 보내지 못했습니다: {error}"
+
+
+state, posts = load_posts()
+
+with st.sidebar:
+    st.markdown("### 📰 메르 댓글 라이브러리")
+    st.caption("원문 중심 댓글 참고자료")
+    st.markdown("**자동 확인**  ·  매일 07:00 / 13:00")
+    st.caption(f"마지막 성공: {format_timestamp(str(state.get('last_successful_run', '')))}")
+    query = st.text_input("글 검색", placeholder="제목·날짜·logNo")
+
+    needle = query.strip().casefold()
+    filtered = [
+        post
+        for post in posts
+        if not needle
+        or needle
+        in f"{post.get('title', '')} {post.get('published_date', '')} {post['log_no']}".casefold()
+    ]
+
+    if not filtered:
+        st.info("조건에 맞는 글이 없습니다.")
+        selected_log_no = ""
+    else:
+        labels = {
+            post["log_no"]: f"{post.get('published_date', '')} · {post.get('title', post['log_no'])}"
+            for post in filtered
+        }
+        requested = str(st.query_params.get("post", ""))
+        default_index = next((i for i, post in enumerate(filtered) if post["log_no"] == requested), 0)
+        selected_log_no = st.radio(
+            "블로그 글",
+            [post["log_no"] for post in filtered],
+            index=default_index,
+            format_func=lambda value: labels[value],
+            label_visibility="collapsed",
+        )
+
+if not posts:
+    st.markdown('<p class="mer-eyebrow">NO REPORTS YET</p>', unsafe_allow_html=True)
+    st.markdown('<h1 class="mer-title">아직 처리된 새 글이 없습니다.</h1>', unsafe_allow_html=True)
+    st.write("다음 자동 실행에서 새 글이 발견되면 이 화면에 추가됩니다.")
+    st.stop()
+
+selected = next((post for post in posts if post["log_no"] == selected_log_no), posts[0])
+st.query_params["post"] = selected["log_no"]
+
+st.markdown(
+    f'<p class="mer-eyebrow">{html.escape(str(selected.get("published_date", "")))} · LOG {selected["log_no"]}</p>',
+    unsafe_allow_html=True,
+)
+st.markdown(f'<h1 class="mer-title">{html.escape(str(selected.get("title", "")))}</h1>', unsafe_allow_html=True)
+st.markdown(
+    f'<p class="mer-meta">최초 발견 {format_timestamp(str(selected.get("first_seen_at", "")))} · '
+    f'마지막 확인 {format_timestamp(str(selected.get("last_checked_at", "")))}</p>',
+    unsafe_allow_html=True,
+)
+
+metric_columns = st.columns(4)
+metric_columns[0].metric("전체 댓글", f"{int(selected.get('comment_count', 0)):,}")
+metric_columns[1].metric("메르 댓글", int(selected.get("manager_comment_count", 0)))
+metric_columns[2].metric("참고 묶음", int(selected.get("topic_count", 0)))
+metric_columns[3].metric("확인 슬롯", str(state.get("last_run_slot", "—")))
+
+action_left, action_mid, action_right = st.columns([1, 1, 2])
+with action_left:
+    st.link_button("네이버 원문 ↗", str(selected.get("url", "https://blog.naver.com/ranto28")), use_container_width=True)
+with action_mid:
+    report_md_path = ROOT / str(selected.get("report_md", ""))
+    if report_md_path.is_file():
+        st.download_button(
+            "Markdown 받기",
+            data=report_md_path.read_bytes(),
+            file_name=report_md_path.name,
+            mime="text/markdown",
+            use_container_width=True,
+        )
+with action_right:
+    if st.button("↻ 새 댓글 조회", type="primary", use_container_width=True):
+        with st.spinner("조회 요청을 보내는 중…"):
+            ok, message = request_refresh(selected)
+        (st.success if ok else st.warning)(message)
+
+if not REFRESH_WEBHOOK:
+    st.caption("클라우드에서 수동 조회를 실행하려면 MER_REFRESH_WEBHOOK_URL 비밀값을 연결해야 합니다. 자동 생성된 보고서는 Git 푸시 후 화면에 반영됩니다.")
+
+report_html_path = ROOT / str(selected.get("report_html", ""))
+if report_html_path.is_file():
+    components.html(report_html_path.read_text(encoding="utf-8"), height=1400, scrolling=True)
+else:
+    st.error(f"HTML 보고서를 찾을 수 없습니다: {report_html_path.name}")

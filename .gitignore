@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.streamlit/secrets.toml
+.mer-manual-jobs.json
+.mer-manual-refresh-*.log
+.mer-manual-refresh-*.summary.txt
+dashboard/
+*.log
+.streamlit.stdout.log
+.streamlit.stderr.log
+메르_댓글_큐레이션_예시.*
+메르_댓글_통합화면_실행.cmd
