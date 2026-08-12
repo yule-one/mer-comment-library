@@ -2,6 +2,9 @@
 
 메르의 네이버 블로그 새 글에서 본문에 참고할 정보 댓글과 완결된 댓글 대화를 원문 중심으로 모아 보여주는 Streamlit 화면입니다.
 
+- 공개 앱: https://mer-blog-comments.streamlit.app/
+- 공개 저장소: https://github.com/yule-one/mer-comment-library
+
 ## 로컬 실행
 
 ```powershell
