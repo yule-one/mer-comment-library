@@ -1,4 +1,4 @@
-name: Manual Mer comment refresh
+name: Queue local Mer comment refresh
 
 on:
   workflow_dispatch:
@@ -11,22 +11,22 @@ on:
     types: [manual-mer-comment-refresh]
 
 concurrency:
-  group: manual-mer-comment-refresh-${{ github.event.inputs.log_no || github.event.client_payload.logNo }}
+  group: queue-local-mer-comment-refresh
   cancel-in-progress: false
 
 permissions:
-  contents: write
+  contents: read
+  issues: write
 
 jobs:
-  refresh:
+  queue:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 5
     steps:
-      - name: Check out reports
+      - name: Check out report state
         uses: actions/checkout@v5
         with:
           ref: main
-          fetch-depth: 0
           persist-credentials: false
 
       - name: Validate target
@@ -46,37 +46,39 @@ jobs:
           PY
           echo "log_no=$REQUESTED_LOG_NO" >> "$GITHUB_OUTPUT"
 
-      - name: Collect current public comments
-        run: python scripts/fetch_naver_comments.py "${{ steps.target.outputs.log_no }}"
-
-      - name: Run the same AI curation rules
-        id: codex
-        uses: openai/codex-action@v1
-        with:
-          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
-          prompt-file: .github/codex/prompts/manual-refresh.md
-          sandbox: workspace-write
-          effort: high
-          codex-args: '["--ephemeral"]'
-          output-file: ${{ runner.temp }}/codex-final-message.txt
-
-      - name: Validate generated changes
-        run: python scripts/validate_manual_refresh.py "${{ steps.target.outputs.log_no }}"
-
-      - name: Commit and publish verified report changes
+      - name: Add request to the local worker queue
         env:
-          GH_PUSH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
           LOG_NO: ${{ steps.target.outputs.log_no }}
         run: |
-          REPORT_MD=$(python -c "import json,os; print(json.load(open('.mer-curation-state.json', encoding='utf-8'))['posts'][os.environ['LOG_NO']]['report_md'])")
-          REPORT_HTML=$(python -c "import json,os; print(json.load(open('.mer-curation-state.json', encoding='utf-8'))['posts'][os.environ['LOG_NO']]['report_html'])")
-          git add -- .mer-curation-state.json "$REPORT_MD" "$REPORT_HTML"
-          if git diff --cached --quiet; then
-            echo "No report or state changes to publish."
+          LABEL="mer-local-refresh"
+          TITLE="[mer-local-refresh] ${LOG_NO}"
+          gh label create "$LABEL" \
+            --repo "$GITHUB_REPOSITORY" \
+            --color "194F3D" \
+            --description "Queued for the trusted local Mer comment worker" \
+            --force
+          EXISTING=$(gh issue list \
+            --repo "$GITHUB_REPOSITORY" \
+            --label "$LABEL" \
+            --state open \
+            --limit 100 \
+            --json number,title \
+            --jq ".[] | select(.title == \"${TITLE}\") | .number" \
+            | head -n 1)
+          if [[ -n "$EXISTING" ]]; then
+            echo "Request already queued in issue #${EXISTING}."
             exit 0
           fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -m "Manual Mer comment refresh ${LOG_NO}"
-          git remote set-url origin "https://x-access-token:${GH_PUSH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          git push origin HEAD:main
+          cat > "$RUNNER_TEMP/request.md" <<EOF
+          This issue is a machine-readable request for the trusted local worker.
+
+          log_no: ${LOG_NO}
+          requested_at: $(date -u +'%Y-%m-%dT%H:%M:%SZ')
+          requested_by: ${GITHUB_ACTOR}
+          EOF
+          gh issue create \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$TITLE" \
+            --label "$LABEL" \
+            --body-file "$RUNNER_TEMP/request.md"

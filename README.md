@@ -23,19 +23,35 @@ python -m streamlit run streamlit_app.py
 
 ## 새 댓글 AI 선별·반영 버튼
 
-배포 화면의 버튼은 GitHub Actions의 `manual-refresh.yml`을 실행합니다. 선택한 글의 현재 공개 댓글 전체를 다시 수집하고, 저장된 `comment_id`와 비교해 새 댓글만 찾은 뒤 오전 7시·오후 1시 자동 작업과 동일한 기준으로 AI가 선별합니다. 포함한 댓글은 중략 없이 원문 전체와 연결된 대화를 Markdown/HTML 보고서에 추가하고, 상태 파일을 갱신해 `main`에 푸시합니다. Streamlit 화면은 그 푸시를 받아 자동 갱신됩니다.
+배포 화면의 버튼은 GitHub Actions의 `manual-refresh.yml`을 호출해 숫자 `logNo`만 안전한 GitHub Issue 작업 큐에 등록합니다. 켜져 있는 로컬 PC의 실행기가 큐를 확인해 현재 공개 댓글 전체를 다시 수집하고, 저장된 `comment_id`와 비교해 새 댓글만 찾은 뒤 오전 7시·오후 1시 자동 작업과 동일한 기준으로 로컬 Codex가 선별합니다. 포함한 댓글은 중략 없이 원문 전체와 연결된 대화를 Markdown/HTML 보고서에 추가하고, 상태 파일을 갱신해 `main`에 푸시합니다. Streamlit 화면은 그 푸시를 받아 자동 갱신됩니다.
 
 한 번만 다음 비밀값을 설정해야 합니다.
 
-1. GitHub 저장소의 **Settings → Secrets and variables → Actions**에 `OPENAI_API_KEY`를 추가합니다. ChatGPT 구독과 별개인 OpenAI API 키이며, 실행량에 따라 API 사용료가 발생합니다.
-2. Streamlit Community Cloud 앱의 **Settings → Secrets**에 아래 값을 추가합니다. `MER_GITHUB_TOKEN`은 이 저장소의 Actions 워크플로 실행 권한만 가진 fine-grained GitHub 토큰을 권장합니다. 공개 화면의 무단 API 실행을 막기 위해 본인만 아는 `MER_REFRESH_PASSCODE`도 설정합니다.
+1. 로컬 PC에서 Codex CLI가 ChatGPT 계정으로 로그인되어 있어야 합니다. `codex login status`로 확인할 수 있습니다.
+2. Streamlit Community Cloud 앱의 **Settings → Secrets**에 아래 값을 추가합니다. `MER_GITHUB_TOKEN`은 이 저장소의 Actions 워크플로 실행 권한만 가진 fine-grained GitHub 토큰을 권장합니다. 공개 화면의 무단 실행을 막기 위해 본인만 아는 `MER_REFRESH_PASSCODE`도 설정합니다.
 
 ```toml
 MER_GITHUB_TOKEN = "github_pat_..."
 MER_REFRESH_PASSCODE = "길고 추측하기 어려운 조회 암호"
 ```
 
-비밀값은 저장소 파일이나 커밋에 넣지 않습니다. 설정 전에도 화면의 **GitHub Actions 실행 상태 보기** 링크에서 워크플로를 직접 실행할 수 있지만, `OPENAI_API_KEY`가 없으면 AI 단계는 실행되지 않습니다.
+비밀값은 저장소 파일이나 커밋에 넣지 않습니다. OpenAI API 키는 사용하지 않습니다.
+
+## 로컬 PC 실행기
+
+다음 명령으로 실행기를 시작합니다.
+
+```powershell
+.\start-local-refresh-worker.ps1
+```
+
+기존 로컬 통합 화면을 쓰는 경우 `dashboard\start-dashboard.ps1`을 실행해도 댓글 실행기가 함께 시작됩니다. 실행기는 `%LOCALAPPDATA%\MerCommentLibraryWorker`의 전용 복제본만 초기화하므로 이 작업 폴더의 수동 수정에는 손대지 않습니다.
+
+- PC와 실행기가 켜져 있어야 큐가 처리됩니다.
+- PC가 꺼져 있으면 요청은 공개 GitHub Issue 큐에서 대기하고, 다음에 실행기를 켰을 때 처리됩니다.
+- 작업 로그: `%LOCALAPPDATA%\MerCommentLibraryWorker\worker.log`
+- 실행기 종료: 작업 관리자에서 해당 PowerShell 프로세스를 종료하거나 PC를 재시작합니다.
+- 별도 OpenAI API 비용은 없지만 ChatGPT/Codex 구독의 사용 한도는 적용됩니다.
 
 ## 데이터 원칙
 

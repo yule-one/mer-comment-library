@@ -24,6 +24,7 @@ REFRESH_PASSCODE = os.getenv("MER_REFRESH_PASSCODE", "").strip()
 GITHUB_REPOSITORY = os.getenv("MER_GITHUB_REPOSITORY", "yule-one/mer-comment-library").strip()
 GITHUB_WORKFLOW = os.getenv("MER_GITHUB_WORKFLOW", "manual-refresh.yml").strip()
 GITHUB_ACTIONS_URL = f"https://github.com/{GITHUB_REPOSITORY}/actions/workflows/{GITHUB_WORKFLOW}"
+GITHUB_QUEUE_URL = f"https://github.com/{GITHUB_REPOSITORY}/issues?q=is%3Aissue+label%3Amer-local-refresh"
 
 
 st.set_page_config(
@@ -138,9 +139,9 @@ def request_refresh(post: dict[str, Any]) -> tuple[bool, str]:
         with urllib.request.urlopen(request, timeout=15) as response:
             body = response.read().decode("utf-8")
         if not body:
-            return True, "AI 댓글 선별 작업을 시작했습니다. 완료되면 보고서와 이 화면이 자동 갱신됩니다."
+            return True, "로컬 PC 작업 큐에 등록했습니다. PC의 실행기가 받으면 AI 선별 후 보고서와 화면이 자동 갱신됩니다."
         result = json.loads(body)
-        message = result.get("job", {}).get("message") or result.get("message") or "AI 댓글 선별 작업을 시작했습니다."
+        message = result.get("job", {}).get("message") or result.get("message") or "로컬 PC 작업 큐에 등록했습니다."
         return True, message
     except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, json.JSONDecodeError) as error:
         return False, f"조회 요청을 보내지 못했습니다: {error}"
@@ -240,11 +241,15 @@ with action_right:
             (st.success if ok else st.warning)(message)
 
 if (REFRESH_WEBHOOK or GITHUB_TOKEN) and REFRESH_PASSCODE:
-    st.caption("버튼을 누르면 현재 새 댓글을 다시 수집하고, 자동 작업과 같은 기준으로 AI가 선별해 원문 전체와 연결 대화를 보고서에 반영합니다.")
+    st.caption("버튼을 누르면 작업이 GitHub 큐에 등록됩니다. 켜져 있는 로컬 PC가 요청을 받아 자동 작업과 같은 기준으로 댓글을 선별하고 보고서에 반영합니다.")
 else:
     st.warning("수동 AI 조회 연결에 필요한 Streamlit 비밀값 `MER_GITHUB_TOKEN`과 `MER_REFRESH_PASSCODE`를 확인해 주세요.")
 
-st.link_button("GitHub Actions 실행 상태 보기 ↗", GITHUB_ACTIONS_URL)
+status_left, status_right = st.columns(2)
+with status_left:
+    st.link_button("요청 접수 상태 보기 ↗", GITHUB_ACTIONS_URL, use_container_width=True)
+with status_right:
+    st.link_button("로컬 작업 큐 보기 ↗", GITHUB_QUEUE_URL, use_container_width=True)
 
 report_html_path = ROOT / str(selected.get("report_html", ""))
 if report_html_path.is_file():
