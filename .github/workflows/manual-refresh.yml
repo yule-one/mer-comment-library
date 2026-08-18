@@ -1,0 +1,82 @@
+name: Manual Mer comment refresh
+
+on:
+  workflow_dispatch:
+    inputs:
+      log_no:
+        description: Naver blog logNo already present in the report state
+        required: true
+        type: string
+  repository_dispatch:
+    types: [manual-mer-comment-refresh]
+
+concurrency:
+  group: manual-mer-comment-refresh-${{ github.event.inputs.log_no || github.event.client_payload.logNo }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out reports
+        uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate target
+        id: target
+        env:
+          REQUESTED_LOG_NO: ${{ github.event.inputs.log_no || github.event.client_payload.logNo }}
+        run: |
+          if [[ ! "$REQUESTED_LOG_NO" =~ ^[0-9]{8,20}$ ]]; then
+            echo "Invalid logNo" >&2
+            exit 1
+          fi
+          python - "$REQUESTED_LOG_NO" <<'PY'
+          import json, sys
+          state = json.load(open('.mer-curation-state.json', encoding='utf-8'))
+          if sys.argv[1] not in state.get('posts', {}):
+              raise SystemExit('logNo is not present in the report state')
+          PY
+          echo "log_no=$REQUESTED_LOG_NO" >> "$GITHUB_OUTPUT"
+
+      - name: Collect current public comments
+        run: python scripts/fetch_naver_comments.py "${{ steps.target.outputs.log_no }}"
+
+      - name: Run the same AI curation rules
+        id: codex
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          prompt-file: .github/codex/prompts/manual-refresh.md
+          sandbox: workspace-write
+          effort: high
+          codex-args: '["--ephemeral"]'
+          output-file: ${{ runner.temp }}/codex-final-message.txt
+
+      - name: Validate generated changes
+        run: python scripts/validate_manual_refresh.py "${{ steps.target.outputs.log_no }}"
+
+      - name: Commit and publish verified report changes
+        env:
+          GH_PUSH_TOKEN: ${{ github.token }}
+          LOG_NO: ${{ steps.target.outputs.log_no }}
+        run: |
+          REPORT_MD=$(python -c "import json,os; print(json.load(open('.mer-curation-state.json', encoding='utf-8'))['posts'][os.environ['LOG_NO']]['report_md'])")
+          REPORT_HTML=$(python -c "import json,os; print(json.load(open('.mer-curation-state.json', encoding='utf-8'))['posts'][os.environ['LOG_NO']]['report_html'])")
+          git add -- .mer-curation-state.json "$REPORT_MD" "$REPORT_HTML"
+          if git diff --cached --quiet; then
+            echo "No report or state changes to publish."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Manual Mer comment refresh ${LOG_NO}"
+          git remote set-url origin "https://x-access-token:${GH_PUSH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push origin HEAD:main

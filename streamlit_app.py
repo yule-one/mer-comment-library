@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import html
+import hmac
 import json
 import os
 import re
 import urllib.error
-import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -19,8 +19,11 @@ ROOT = Path(__file__).resolve().parent
 STATE_PATH = ROOT / ".mer-curation-state.json"
 REFRESH_WEBHOOK = os.getenv("MER_REFRESH_WEBHOOK_URL", "").strip()
 REFRESH_TOKEN = os.getenv("MER_REFRESH_WEBHOOK_TOKEN", "").strip()
-NAVER_BLOG_NO = "35863879"
-NAVER_COMMENT_ENDPOINT = "https://apis.naver.com/commentBox/cbox/web_naver_list_jsonp.json"
+GITHUB_TOKEN = os.getenv("MER_GITHUB_TOKEN", "").strip()
+REFRESH_PASSCODE = os.getenv("MER_REFRESH_PASSCODE", "").strip()
+GITHUB_REPOSITORY = os.getenv("MER_GITHUB_REPOSITORY", "yule-one/mer-comment-library").strip()
+GITHUB_WORKFLOW = os.getenv("MER_GITHUB_WORKFLOW", "manual-refresh.yml").strip()
+GITHUB_ACTIONS_URL = f"https://github.com/{GITHUB_REPOSITORY}/actions/workflows/{GITHUB_WORKFLOW}"
 
 
 st.set_page_config(
@@ -45,9 +48,6 @@ st.markdown(
     .mer-meta { color:#697069; margin-bottom:1.25rem; }
     .mer-card { border:1px solid #d9d0bf; border-radius:18px; padding:1rem 1.1rem; background:rgba(255,253,248,.78); }
     .mer-note { border-left:4px solid #a27325; padding:.85rem 1rem; background:#fff0d6; border-radius:0 12px 12px 0; color:#5f4b2c; }
-    .mer-comment { white-space:pre-wrap; overflow-wrap:anywhere; padding:.9rem 1rem; margin:.45rem 0 1rem; border:1px solid #ded5c4; border-radius:12px; background:#fffdf8; color:#17231f; }
-    .mer-comment-meta { color:#697069; font-size:.82rem; margin-top:.8rem; }
-    .mer-new { display:inline-block; padding:.12rem .45rem; margin-right:.4rem; border-radius:999px; background:#194f3d; color:#fff; font-size:.72rem; font-weight:800; }
     div[data-testid="stMetric"] { border:1px solid #d9d0bf; border-radius:15px; padding:.85rem 1rem; background:rgba(255,253,248,.80); }
     iframe { border-radius:18px; border:1px solid #d9d0bf !important; background:#fff; }
     </style>
@@ -102,155 +102,48 @@ def load_posts() -> tuple[dict[str, Any], list[dict[str, Any]]]:
 
 
 def request_refresh(post: dict[str, Any]) -> tuple[bool, str]:
-    payload = {
-        "logNo": post["log_no"],
-        "url": post.get("url", ""),
-        "source": "streamlit",
-    }
-    headers = {"Content-Type": "application/json"}
-    if REFRESH_TOKEN:
-        headers["Authorization"] = f"Bearer {REFRESH_TOKEN}"
+    if REFRESH_WEBHOOK:
+        endpoint = REFRESH_WEBHOOK
+        payload = {
+            "logNo": post["log_no"],
+            "url": post.get("url", ""),
+            "source": "streamlit",
+        }
+        headers = {"Content-Type": "application/json"}
+        if REFRESH_TOKEN:
+            headers["Authorization"] = f"Bearer {REFRESH_TOKEN}"
+    elif GITHUB_TOKEN:
+        endpoint = (
+            f"https://api.github.com/repos/{GITHUB_REPOSITORY}/actions/"
+            f"workflows/{GITHUB_WORKFLOW}/dispatches"
+        )
+        payload = {"ref": "main", "inputs": {"log_no": post["log_no"]}}
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {GITHUB_TOKEN}",
+            "Content-Type": "application/json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": "mer-comment-library",
+        }
+    else:
+        return False, "AI 재조회 연결이 아직 완료되지 않았습니다. 관리자에게 비밀값 설정을 요청해 주세요."
 
     request = urllib.request.Request(
-        REFRESH_WEBHOOK,
+        endpoint,
         data=json.dumps(payload).encode("utf-8"),
         headers=headers,
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=8) as response:
-            result = json.loads(response.read().decode("utf-8") or "{}")
-        message = result.get("job", {}).get("message") or result.get("message") or "조회 요청을 보냈습니다."
+        with urllib.request.urlopen(request, timeout=15) as response:
+            body = response.read().decode("utf-8")
+        if not body:
+            return True, "AI 댓글 선별 작업을 시작했습니다. 완료되면 보고서와 이 화면이 자동 갱신됩니다."
+        result = json.loads(body)
+        message = result.get("job", {}).get("message") or result.get("message") or "AI 댓글 선별 작업을 시작했습니다."
         return True, message
     except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, json.JSONDecodeError) as error:
         return False, f"조회 요청을 보내지 못했습니다: {error}"
-
-
-def naver_comment_page(log_no: str, page: int) -> dict[str, Any]:
-    params = {
-        "ticket": "blog",
-        "templateId": "default",
-        "pool": "cbox9",
-        "_callback": "merCommentLibrary",
-        "lang": "ko",
-        "country": "KR",
-        "objectId": f"{NAVER_BLOG_NO}_201_{log_no}",
-        "categoryId": "",
-        "pageSize": "100",
-        "indexSize": "10",
-        "groupId": "",
-        "listType": "OBJECT",
-        "pageType": "default",
-        "page": str(page),
-        "initialize": "false",
-        "followSize": "5",
-    }
-    url = f"{NAVER_COMMENT_ENDPOINT}?{urllib.parse.urlencode(params)}"
-    request = urllib.request.Request(
-        url,
-        headers={
-            "User-Agent": "Mozilla/5.0 (compatible; MerCommentLibrary/1.0)",
-            "Referer": f"https://blog.naver.com/PostView.naver?blogId=ranto28&logNo={log_no}",
-        },
-    )
-    with urllib.request.urlopen(request, timeout=15) as response:
-        raw = response.read().decode("utf-8")
-    start, end = raw.find("("), raw.rfind(")")
-    if start < 0 or end <= start:
-        raise ValueError("네이버 댓글 응답 형식을 확인할 수 없습니다.")
-    data = json.loads(raw[start + 1 : end])
-    if not data.get("success"):
-        raise ValueError(str(data.get("message") or "네이버 댓글 조회에 실패했습니다."))
-    return dict(data.get("result") or {})
-
-
-def is_public_comment(comment: dict[str, Any]) -> bool:
-    return bool(
-        comment.get("commentNo")
-        and not comment.get("secret")
-        and not comment.get("deleted")
-        and not comment.get("hiddenByCleanbot")
-        and comment.get("visible", True)
-        and comment.get("expose", True)
-        and comment.get("objectStatus", "SHOW") == "SHOW"
-    )
-
-
-def live_comment_preview(post: dict[str, Any]) -> dict[str, Any]:
-    first = naver_comment_page(post["log_no"], 1)
-    page_model = first.get("pageModel") or {}
-    total_pages = max(1, min(int(page_model.get("totalPages") or 1), 50))
-    comments: list[dict[str, Any]] = []
-
-    for page in range(1, total_pages + 1):
-        result = first if page == 1 else naver_comment_page(post["log_no"], page)
-        for raw in result.get("commentList") or []:
-            comment = dict(raw)
-            comment["page"] = page
-            if is_public_comment(comment):
-                comments.append(comment)
-
-    saved_ids = {str(value) for value in post.get("comment_ids", [])}
-    new_ids = {
-        str(comment["commentNo"])
-        for comment in comments
-        if str(comment["commentNo"]) not in saved_ids
-    }
-    by_parent: dict[str, list[dict[str, Any]]] = {}
-    for comment in comments:
-        comment_no = str(comment["commentNo"])
-        parent_no = str(comment.get("parentCommentNo") or comment_no)
-        by_parent.setdefault(parent_no, []).append(comment)
-
-    threads: list[list[dict[str, Any]]] = []
-    for thread in by_parent.values():
-        if not any(str(comment["commentNo"]) in new_ids for comment in thread):
-            continue
-        thread.sort(key=lambda item: int(item.get("sortValue") or 0))
-        threads.append(thread)
-    threads.sort(key=lambda thread: int(thread[0].get("sortValue") or 0), reverse=True)
-
-    return {
-        "checked_at": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
-        "total_count": len(comments),
-        "new_count": len(new_ids),
-        "new_ids": sorted(new_ids),
-        "threads": threads,
-    }
-
-
-def render_live_preview(preview: dict[str, Any]) -> None:
-    new_ids = set(preview.get("new_ids") or [])
-    new_count = int(preview.get("new_count") or 0)
-    checked_at = format_timestamp(str(preview.get("checked_at") or ""))
-    if not new_count:
-        st.success(f"{checked_at} 기준, 저장된 상태 이후 새 공개 댓글이 없습니다.")
-        return
-
-    st.info(
-        f"새 공개 댓글 {new_count}개를 찾았습니다. 아래 내용은 즉시 확인용 원문이며, "
-        "AI 선별·보고서 저장은 07:00/13:00 자동 작업에서 반영됩니다."
-    )
-    for index, thread in enumerate(preview.get("threads") or [], 1):
-        new_in_thread = sum(str(comment["commentNo"]) in new_ids for comment in thread)
-        root = thread[0]
-        root_author = str(root.get("userName") or root.get("maskedUserName") or "작성자 미상")
-        with st.expander(f"대화 {index} · 새 댓글 {new_in_thread}개 · {root_author}", expanded=index == 1):
-            for comment in thread:
-                comment_no = str(comment["commentNo"])
-                author = str(comment.get("userName") or comment.get("maskedUserName") or "작성자 미상")
-                if comment.get("manager") or comment.get("profileUserId") == "ranto28":
-                    author += " · 메르"
-                reply_label = "답글" if int(comment.get("replyLevel") or 1) > 1 else "원댓글"
-                new_badge = '<span class="mer-new">NEW</span>' if comment_no in new_ids else ""
-                meta = (
-                    f"{new_badge}<strong>{html.escape(author)}</strong> · {reply_label} · "
-                    f"{html.escape(str(comment.get('regTime') or '시각 미상'))} · "
-                    f"댓글 {int(comment.get('page') or 1)}페이지 · 공감 {int(comment.get('sympathyCount') or 0)}"
-                )
-                contents = html.escape(str(comment.get("contents") or ""))
-                st.markdown(f'<div class="mer-comment-meta">{meta}</div>', unsafe_allow_html=True)
-                st.markdown(f'<div class="mer-comment">{contents}</div>', unsafe_allow_html=True)
 
 
 state, posts = load_posts()
@@ -315,7 +208,7 @@ metric_columns[1].metric("메르 댓글", int(selected.get("manager_comment_coun
 metric_columns[2].metric("참고 묶음", int(selected.get("topic_count", 0)))
 metric_columns[3].metric("확인 슬롯", str(state.get("last_run_slot", "—")))
 
-action_left, action_mid, action_right = st.columns([1, 1, 2])
+action_left, action_mid, action_code, action_right = st.columns([1, 1, 1.2, 1.8])
 with action_left:
     st.link_button("네이버 원문 ↗", str(selected.get("url", "https://blog.naver.com/ranto28")), use_container_width=True)
 with action_mid:
@@ -328,26 +221,30 @@ with action_mid:
             mime="text/markdown",
             use_container_width=True,
         )
+with action_code:
+    entered_passcode = st.text_input(
+        "조회 암호",
+        type="password",
+        placeholder="조회 암호",
+        label_visibility="collapsed",
+    )
 with action_right:
-    if st.button("↻ 새 댓글 조회", type="primary", use_container_width=True):
-        if REFRESH_WEBHOOK:
-            with st.spinner("조회 요청을 보내는 중…"):
+    if st.button("↻ 새 댓글 AI 선별·반영", type="primary", use_container_width=True):
+        if not REFRESH_PASSCODE:
+            st.warning("수동 AI 조회용 비밀값 `MER_REFRESH_PASSCODE`가 설정되지 않았습니다.")
+        elif not hmac.compare_digest(entered_passcode, REFRESH_PASSCODE):
+            st.warning("조회 암호가 맞지 않습니다.")
+        else:
+            with st.spinner("07:00/13:00과 같은 댓글 선별 작업을 요청하는 중…"):
                 ok, message = request_refresh(selected)
             (st.success if ok else st.warning)(message)
-        else:
-            try:
-                with st.spinner("네이버의 현재 공개 댓글을 확인하는 중…"):
-                    preview = live_comment_preview(selected)
-                st.session_state[f"live_preview_{selected['log_no']}"] = preview
-            except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError, json.JSONDecodeError) as error:
-                st.warning(f"새 댓글을 확인하지 못했습니다: {error}")
 
-if not REFRESH_WEBHOOK:
-    st.caption("조회 버튼은 네이버의 새 공개 댓글 원문을 즉시 확인합니다. AI 선별·보고서 저장은 매일 07:00/13:00 자동 작업에서 반영됩니다.")
+if (REFRESH_WEBHOOK or GITHUB_TOKEN) and REFRESH_PASSCODE:
+    st.caption("버튼을 누르면 현재 새 댓글을 다시 수집하고, 자동 작업과 같은 기준으로 AI가 선별해 원문 전체와 연결 대화를 보고서에 반영합니다.")
+else:
+    st.warning("수동 AI 조회 연결에 필요한 Streamlit 비밀값 `MER_GITHUB_TOKEN`과 `MER_REFRESH_PASSCODE`를 확인해 주세요.")
 
-preview_key = f"live_preview_{selected['log_no']}"
-if not REFRESH_WEBHOOK and preview_key in st.session_state:
-    render_live_preview(st.session_state[preview_key])
+st.link_button("GitHub Actions 실행 상태 보기 ↗", GITHUB_ACTIONS_URL)
 
 report_html_path = ROOT / str(selected.get("report_html", ""))
 if report_html_path.is_file():

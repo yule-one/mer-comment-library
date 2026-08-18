@@ -11,5 +11,6 @@ dashboard/
 *.log
 .streamlit.stdout.log
 .streamlit.stderr.log
+.manual-refresh-comments.json
 메르_댓글_큐레이션_예시.*
 메르_댓글_통합화면_실행.cmd
