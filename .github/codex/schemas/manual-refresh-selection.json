@@ -13,8 +13,7 @@
           "parent_comment_ids": {
             "type": "array",
             "items": { "type": "string", "pattern": "^[0-9]+$" },
-            "minItems": 1,
-            "uniqueItems": true
+            "minItems": 1
           }
         },
         "required": ["title", "context", "caution", "parent_comment_ids"],
