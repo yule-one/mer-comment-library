@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "topics": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "title": { "type": "string", "minLength": 1 },
+          "context": { "type": "string" },
+          "caution": { "type": "string" },
+          "parent_comment_ids": {
+            "type": "array",
+            "items": { "type": "string", "pattern": "^[0-9]+$" },
+            "minItems": 1,
+            "uniqueItems": true
+          }
+        },
+        "required": ["title", "context", "caution", "parent_comment_ids"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["topics"],
+  "additionalProperties": false
+}

@@ -16,7 +16,11 @@ $MutexName = "Local\MerCommentLibraryRefreshWorker"
 
 function Write-WorkerLog([string]$Message) {
   $line = "{0} {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $Message
-  Add-Content -LiteralPath $LogPath -Value $line -Encoding UTF8
+  try {
+    [IO.File]::AppendAllText($LogPath, "$line`r`n", [Text.UTF8Encoding]::new($false))
+  } catch {
+    Write-Warning "Worker log write failed: $($_.Exception.Message)"
+  }
 }
 
 function Invoke-Native([string]$FilePath, [string[]]$Arguments, [string]$WorkingDirectory = $WorkerHome) {
@@ -37,9 +41,37 @@ function Find-CodexBinary {
     Sort-Object LastWriteTime -Descending |
     Select-Object -First 1 -ExpandProperty FullName
   if (-not $candidate) {
-    throw "로컬 Codex 실행 파일을 찾지 못했습니다. Codex 앱을 설치하고 로그인해 주세요."
+    throw "Local Codex executable was not found. Install Codex and sign in first."
   }
   return $candidate
+}
+
+function Invoke-LocalCodex([string]$CodexPath, [string]$PromptPath, [string]$SelectionPath, [string]$SchemaPath) {
+  $stdoutPath = Join-Path $WorkerHome "codex.stdout.log"
+  $stderrPath = Join-Path $WorkerHome "codex.stderr.log"
+  $arguments = @(
+    "exec",
+    "-C", "`"$WorkerRepo`"",
+    "--sandbox", "read-only",
+    "--ephemeral",
+    "--ignore-user-config",
+    "--ignore-rules",
+    "--output-schema", "`"$SchemaPath`"",
+    "--output-last-message", "`"$SelectionPath`"",
+    "-"
+  )
+  $process = Start-Process -FilePath $CodexPath `
+    -ArgumentList $arguments `
+    -WorkingDirectory $WorkerRepo `
+    -WindowStyle Hidden `
+    -RedirectStandardInput $PromptPath `
+    -RedirectStandardOutput $stdoutPath `
+    -RedirectStandardError $stderrPath `
+    -Wait `
+    -PassThru
+  if ($process.ExitCode -ne 0) {
+    throw "Local Codex failed with exit code $($process.ExitCode). See $stderrPath"
+  }
 }
 
 function Initialize-WorkerRepository {
@@ -52,7 +84,7 @@ function Reset-WorkerRepository {
   $resolvedHome = [IO.Path]::GetFullPath($WorkerHome).TrimEnd('\') + '\'
   $resolvedRepo = [IO.Path]::GetFullPath($WorkerRepo).TrimEnd('\') + '\'
   if (-not $resolvedRepo.StartsWith($resolvedHome, [StringComparison]::OrdinalIgnoreCase)) {
-    throw "전용 작업 폴더 검증에 실패했습니다: $resolvedRepo"
+    throw "Dedicated worker directory validation failed: $resolvedRepo"
   }
   Invoke-Native "git" @("fetch", "origin", "main") $WorkerRepo
   Invoke-Native "git" @("reset", "--hard", "origin/main") $WorkerRepo
@@ -61,10 +93,10 @@ function Reset-WorkerRepository {
 
 function Get-QueuedIssue {
   $raw = & gh issue list --repo $Repository --label $QueueLabel --state open --limit 50 --json number,title,author
-  if ($LASTEXITCODE -ne 0) { throw "GitHub 작업 큐를 읽지 못했습니다." }
+  if ($LASTEXITCODE -ne 0) { throw "Could not read the GitHub work queue." }
   $issues = @($raw | ConvertFrom-Json)
   foreach ($issue in $issues) {
-    if ($issue.author.login -ne "github-actions[bot]") { continue }
+    if ($issue.author.login -notin @("app/github-actions", "github-actions[bot]")) { continue }
     if ($issue.title -match '^\[mer-local-refresh\] ([0-9]{8,20})$') {
       return [PSCustomObject]@{ Number = [int]$issue.number; LogNo = $Matches[1] }
     }
@@ -79,7 +111,7 @@ function Set-IssueComment([int]$IssueNumber, [string]$Message) {
 
 function Close-QueueIssue([int]$IssueNumber, [string]$Message) {
   & gh issue close $IssueNumber --repo $Repository --comment $Message | Out-Null
-  if ($LASTEXITCODE -ne 0) { throw "Issue #$IssueNumber 종료에 실패했습니다." }
+  if ($LASTEXITCODE -ne 0) { throw "Could not close issue #$IssueNumber." }
 }
 
 function Sync-SourceRepository {
@@ -94,31 +126,25 @@ function Sync-SourceRepository {
 
 function Process-QueueIssue($Issue, [string]$CodexPath) {
   Write-WorkerLog "Starting issue #$($Issue.Number), logNo $($Issue.LogNo)."
-  Set-IssueComment $Issue.Number "로컬 PC가 작업을 받았습니다. 댓글 수집과 AI 선별을 시작합니다."
+  Set-IssueComment $Issue.Number "The local PC accepted this job and started comment collection and AI curation."
   Reset-WorkerRepository
 
   Invoke-Native "python" @("scripts/fetch_naver_comments.py", $Issue.LogNo) $WorkerRepo
   $contextPath = Join-Path $WorkerRepo ".manual-refresh-comments.json"
   $context = Get-Content -LiteralPath $contextPath -Raw -Encoding UTF8 | ConvertFrom-Json
   if ([int]$context.new_comment_count -eq 0) {
-    Close-QueueIssue $Issue.Number "새 공개 댓글이 없어 보고서와 상태 파일을 수정하지 않았습니다."
+    Close-QueueIssue $Issue.Number "No new public comments were found, so no report or state file was changed."
     Write-WorkerLog "Issue #$($Issue.Number): no new comments."
     return
   }
 
   $promptPath = Join-Path $WorkerRepo $PromptRelativePath
-  $prompt = Get-Content -LiteralPath $promptPath -Raw -Encoding UTF8
-  $summaryPath = Join-Path $WorkerHome "last-summary.txt"
-  Invoke-Native $CodexPath @(
-    "exec",
-    "-C", $WorkerRepo,
-    "--sandbox", "workspace-write",
-    "--ephemeral",
-    "-c", 'approval_policy="never"',
-    "--output-last-message", $summaryPath,
-    $prompt
-  ) $WorkerRepo
+  $schemaPath = Join-Path $WorkerRepo ".github\codex\schemas\manual-refresh-selection.json"
+  $selectionPath = Join-Path $WorkerHome "selection.json"
+  Remove-Item -LiteralPath $selectionPath -Force -ErrorAction SilentlyContinue
+  Invoke-LocalCodex $CodexPath $promptPath $selectionPath $schemaPath
 
+  Invoke-Native "python" @("scripts/apply_manual_report.py", $selectionPath) $WorkerRepo
   Invoke-Native "python" @("scripts/validate_manual_refresh.py", $Issue.LogNo) $WorkerRepo
   $state = Get-Content -LiteralPath (Join-Path $WorkerRepo ".mer-curation-state.json") -Raw -Encoding UTF8 | ConvertFrom-Json
   $post = $state.posts.PSObject.Properties[$Issue.LogNo].Value
@@ -131,7 +157,7 @@ function Process-QueueIssue($Issue, [string]$CodexPath) {
     Invoke-Native "git" @("commit", "-m", "Manual Mer comment refresh $($Issue.LogNo)") $WorkerRepo
     Invoke-Native "git" @("push", "origin", "HEAD:main") $WorkerRepo
     Sync-SourceRepository
-    Close-QueueIssue $Issue.Number "로컬 AI 선별과 보고서 반영을 완료해 main에 게시했습니다. Streamlit 화면은 잠시 후 갱신됩니다."
+    Close-QueueIssue $Issue.Number "Local AI curation finished and the reports were published to main. Streamlit will refresh shortly."
   } else {
     Close-QueueIssue $Issue.Number "New comments were checked, but no report-worthy thread was selected. Comment ID state was updated."
   }
@@ -141,7 +167,7 @@ function Process-QueueIssue($Issue, [string]$CodexPath) {
 New-Item -ItemType Directory -Path $WorkerHome -Force | Out-Null
 $mutex = [Threading.Mutex]::new($false, $MutexName)
 if (-not $mutex.WaitOne(0)) {
-  throw "로컬 댓글 실행기가 이미 실행 중입니다."
+  throw "The local comment refresh worker is already running."
 }
 
 try {
@@ -160,7 +186,7 @@ try {
     } catch {
       Write-WorkerLog "ERROR: $($_.Exception.Message)"
       if ($issue) {
-        Set-IssueComment $issue.Number "로컬 실행 중 오류가 발생했습니다. PC의 작업 로그를 확인한 뒤 다시 시도합니다."
+        Set-IssueComment $issue.Number "The local worker encountered an error. Check the PC worker log; the queued job will be retried."
       }
     }
     if (-not $Once) { Start-Sleep -Seconds $PollSeconds }
