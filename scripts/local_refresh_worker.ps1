@@ -118,8 +118,15 @@ function Close-QueueIssue([int]$IssueNumber, [string]$Message) {
 
 function Sync-SourceRepository {
   if (-not (Test-Path -LiteralPath (Join-Path $SourceRepository ".git"))) { return }
-  & git -C $SourceRepository pull --ff-only origin main *> $null
-  if ($LASTEXITCODE -eq 0) {
+  $previousPreference = $ErrorActionPreference
+  try {
+    $ErrorActionPreference = "Continue"
+    & git -C $SourceRepository pull --ff-only origin main 2>$null | Out-Null
+    $pullExitCode = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $previousPreference
+  }
+  if ($pullExitCode -eq 0) {
     Write-WorkerLog "Main workspace fast-forwarded after publish."
   } else {
     Write-WorkerLog "Main workspace was not fast-forwarded; local edits were preserved."
