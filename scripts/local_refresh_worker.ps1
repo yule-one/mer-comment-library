@@ -86,9 +86,11 @@ function Reset-WorkerRepository {
   if (-not $resolvedRepo.StartsWith($resolvedHome, [StringComparison]::OrdinalIgnoreCase)) {
     throw "Dedicated worker directory validation failed: $resolvedRepo"
   }
+  # This is a dedicated disposable clone. Clear only tracked leftovers from a
+  # failed job, then fast-forward instead of force-moving the branch ref.
+  Invoke-Native "git" @("restore", "--source=HEAD", "--staged", "--worktree", "--", ".") $WorkerRepo
   Invoke-Native "git" @("fetch", "origin", "main") $WorkerRepo
-  Invoke-Native "git" @("reset", "--hard", "origin/main") $WorkerRepo
-  Invoke-Native "git" @("clean", "-fd", "--", ".manual-refresh-comments.json") $WorkerRepo
+  Invoke-Native "git" @("merge", "--ff-only", "origin/main") $WorkerRepo
 }
 
 function Get-QueuedIssue {
